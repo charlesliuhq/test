@@ -16,10 +16,12 @@
 作者: Claude Code
 """
 
+import csv
 import json
 import math
 import os
 import random
+from itertools import combinations
 
 try:
     import tkinter as tk
@@ -206,6 +208,155 @@ def simulate_tournament(teams, trials=2000):
     return dict((n, wins[n] / float(trials)) for n in bracket)
 
 
+def _pick_group_config(n_teams):
+    """根据可用球队数选择 (小组数, 每组队数)。返回 (0, 0) 表示球队不足。"""
+    for n_groups in (8, 4, 2):
+        if n_groups * 4 <= n_teams:
+            return n_groups, 4
+    return 0, 0
+
+
+def simulate_full_tournament(teams, trials=1000):
+    """
+    完整世界杯赛制蒙特卡洛模拟: 小组循环赛 + 单败淘汰赛。
+
+    流程:
+        - 取评分最高的若干队, 随机分组 (8 组 x 4 队, 或按球队数自动缩减)
+        - 小组赛单循环, 3/1/0 计分, 按 积分 -> 净胜球 -> 进球 排名, 每组前 2 出线
+        - 出线队按标准交叉赛制进入淘汰赛 (组头 vs 另一组次名), 淘汰赛平局点球决胜
+        - 统计每队 夺冠 / 进决赛 / 进四强 的概率
+
+    返回: dict {队名: {"champion": p, "final": p, "semi": p}}
+    """
+    names = sorted(teams, key=lambda n: teams[n], reverse=True)
+    n_groups, group_size = _pick_group_config(len(names))
+    if n_groups == 0:
+        return {}
+    need = n_groups * group_size
+    field = names[:need]
+
+    stats = dict((n, {"champion": 0, "final": 0, "semi": 0}) for n in field)
+
+    for _ in range(trials):
+        order = list(field)
+        random.shuffle(order)  # 随机抽签分组
+        groups = [order[i * group_size:(i + 1) * group_size]
+                  for i in range(n_groups)]
+
+        winners, runners = [], []
+        for g in groups:
+            table = dict((t, [0, 0, 0]) for t in g)  # [积分, 净胜球, 进球]
+            for a, b in combinations(g, 2):
+                ga, gb, _ = simulate_match(teams[a], teams[b])
+                table[a][1] += ga - gb
+                table[b][1] += gb - ga
+                table[a][2] += ga
+                table[b][2] += gb
+                if ga > gb:
+                    table[a][0] += 3
+                elif gb > ga:
+                    table[b][0] += 3
+                else:
+                    table[a][0] += 1
+                    table[b][0] += 1
+            ranked = sorted(
+                g,
+                key=lambda t: (table[t][0], table[t][1], table[t][2],
+                               random.random()),
+                reverse=True)
+            winners.append(ranked[0])
+            runners.append(ranked[1])
+
+        # 标准交叉赛制: 组头对阵相邻组的次名, 同组两队最早决赛才可能相遇
+        alive = []
+        for i in range(0, n_groups, 2):
+            alive.append(winners[i])
+            alive.append(runners[i + 1])
+            alive.append(winners[i + 1])
+            alive.append(runners[i])
+
+        while len(alive) > 1:
+            if len(alive) == 4:
+                for t in alive:
+                    stats[t]["semi"] += 1
+            if len(alive) == 2:
+                for t in alive:
+                    stats[t]["final"] += 1
+            nxt = []
+            for k in range(0, len(alive), 2):
+                a, b = alive[k], alive[k + 1]
+                _, _, w = simulate_match(teams[a], teams[b], knockout=True)
+                nxt.append(a if w == "A" else b)
+            alive = nxt
+        stats[alive[0]]["champion"] += 1
+
+    return dict(
+        (n, dict((k, v / float(trials)) for k, v in s.items()))
+        for n, s in stats.items())
+
+
+# ---------------------------------------------------------------------------
+# 历史数据校准 (Elo)
+# ---------------------------------------------------------------------------
+def load_matches_csv(path):
+    """
+    读取历史比分 CSV, 需含列: home, away, home_goals, away_goals (可选 weight)。
+    返回 [(home, away, home_goals, away_goals, weight), ...]
+    """
+    rows = []
+    with open(path, "r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for r in reader:
+            try:
+                home = r["home"].strip()
+                away = r["away"].strip()
+                hg = int(r["home_goals"])
+                ag = int(r["away_goals"])
+                weight = float(r.get("weight") or 1.0)
+            except (KeyError, ValueError, AttributeError):
+                continue
+            if home and away:
+                rows.append((home, away, hg, ag, weight))
+    return rows
+
+
+def calibrate_ratings(teams, matches, k=24.0, passes=1):
+    """
+    用历史比分对球队评分做 Elo 校准。
+
+    以现有评分为先验, 逐场按实际结果与预期的偏差更新评分;
+    进球差越大, 调整幅度越大 (对数缩放)。未收录的新球队以中位数评分加入。
+
+    返回更新后的评分 dict (仅数值, 保留一位小数)。
+    """
+    ratings = dict(teams)
+    if teams:
+        vals = sorted(teams.values())
+        default = vals[len(vals) // 2]
+    else:
+        default = 1700.0
+
+    for _ in range(max(1, passes)):
+        for home, away, hg, ag, weight in matches:
+            ratings.setdefault(home, default)
+            ratings.setdefault(away, default)
+            ra, rb = ratings[home], ratings[away]
+            exp_home = 1.0 / (1.0 + 10 ** ((rb - ra) / 400.0))
+            if hg > ag:
+                actual = 1.0
+            elif hg < ag:
+                actual = 0.0
+            else:
+                actual = 0.5
+            margin = abs(hg - ag)
+            g = math.log(margin + 1.0) + 1.0  # 净胜球权重
+            delta = k * weight * g * (actual - exp_home)
+            ratings[home] = ra + delta
+            ratings[away] = rb - delta
+
+    return dict((n, round(r, 1)) for n, r in ratings.items())
+
+
 # ---------------------------------------------------------------------------
 # 数据存取
 # ---------------------------------------------------------------------------
@@ -334,6 +485,8 @@ class PredictorApp(object):
             row=0, column=1, padx=4)
         ttk.Button(btns, text="恢复默认", command=self.on_reset).grid(
             row=0, column=2, padx=4)
+        ttk.Button(btns, text="从历史数据校准", command=self.on_calibrate).grid(
+            row=0, column=3, padx=4)
 
         self.tree.bind("<<TreeviewSelect>>", self._on_tree_select)
 
@@ -405,21 +558,61 @@ class PredictorApp(object):
             self._refresh_tree()
             self._refresh_comboboxes()
 
+    def on_calibrate(self):
+        path = filedialog.askopenfilename(
+            title="选择历史比分 CSV (列: home,away,home_goals,away_goals)",
+            filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")])
+        if not path:
+            return
+        try:
+            matches = load_matches_csv(path)
+        except Exception as e:
+            messagebox.showerror("错误", "读取失败: %s" % e)
+            return
+        if not matches:
+            messagebox.showwarning("提示", "未读到有效比分记录。")
+            return
+        before = dict(self.teams)
+        self.teams = calibrate_ratings(self.teams, matches)
+        # 汇总变化最大的几支球队
+        movers = []
+        for name in self.teams:
+            old = before.get(name)
+            if old is not None:
+                movers.append((name, self.teams[name] - old))
+        movers.sort(key=lambda x: abs(x[1]), reverse=True)
+        summary = "\n".join(
+            "  %s: %+.0f" % (n, d) for n, d in movers[:8] if abs(d) >= 0.5)
+        self._refresh_tree()
+        self._refresh_comboboxes()
+        messagebox.showinfo(
+            "校准完成",
+            "已根据 %d 场比赛校准评分。\n\n变化最大的球队:\n%s"
+            % (len(matches), summary or "  (无明显变化)"))
+
     # -- 赛事模拟 --------------------------------------------------------
     def _build_sim_tab(self):
         frm = self.tab_sim
         top = ttk.Frame(frm)
         top.pack(pady=10)
-        ttk.Label(top, text="模拟次数:").grid(row=0, column=0, padx=4)
-        self.ent_trials = ttk.Entry(top, width=10)
+        ttk.Label(top, text="赛制:").grid(row=0, column=0, padx=4)
+        self.cb_mode = ttk.Combobox(
+            top, state="readonly", width=22,
+            values=["完整赛制 (小组赛+淘汰赛)", "单败淘汰赛"])
+        self.cb_mode.current(0)
+        self.cb_mode.grid(row=0, column=1, padx=4)
+        ttk.Label(top, text="模拟次数:").grid(row=0, column=2, padx=4)
+        self.ent_trials = ttk.Entry(top, width=8)
         self.ent_trials.insert(0, "2000")
-        self.ent_trials.grid(row=0, column=1, padx=4)
+        self.ent_trials.grid(row=0, column=3, padx=4)
         ttk.Button(top, text="开始模拟", command=self.on_simulate).grid(
-            row=0, column=2, padx=8)
+            row=0, column=4, padx=8)
 
-        ttk.Label(frm, text="(取评分最高的 2^n 支球队进行单败淘汰赛模拟)").pack()
+        ttk.Label(
+            frm,
+            text="(完整赛制取评分最高的 32/16/8 队分组; 单败淘汰取 2^n 队)").pack()
 
-        self.txt_sim = tk.Text(frm, height=20, width=70, state="disabled")
+        self.txt_sim = tk.Text(frm, height=20, width=72, state="disabled")
         self.txt_sim.pack(padx=10, pady=8, fill="both", expand=True)
 
     def on_simulate(self):
@@ -432,15 +625,36 @@ class PredictorApp(object):
         self._set_text(self.txt_sim, "模拟中, 请稍候...")
         self.root.update_idletasks()
 
+        if self.cb_mode.current() == 0:
+            self._run_full_sim(trials)
+        else:
+            self._run_knockout_sim(trials)
+
+    def _run_knockout_sim(self, trials):
         probs = simulate_tournament(self.teams, trials=trials)
         if not probs:
             self._set_text(self.txt_sim, "球队数量不足, 至少需要 2 支球队。")
             return
         ranked = sorted(probs.items(), key=lambda x: x[1], reverse=True)
-        lines = ["  夺冠概率预测 (模拟 %d 次)" % trials, "-" * 40]
+        lines = ["  夺冠概率预测 - 单败淘汰赛 (模拟 %d 次)" % trials, "-" * 44]
         for i, (name, p) in enumerate(ranked, 1):
             bar = "#" * int(round(p * 40))
             lines.append("  %2d. %-8s %5.1f%%  %s" % (i, name, p * 100, bar))
+        self._set_text(self.txt_sim, "\n".join(lines))
+
+    def _run_full_sim(self, trials):
+        stats = simulate_full_tournament(self.teams, trials=trials)
+        if not stats:
+            self._set_text(self.txt_sim, "球队数量不足, 完整赛制至少需要 8 支球队。")
+            return
+        ranked = sorted(stats.items(),
+                        key=lambda x: x[1]["champion"], reverse=True)
+        lines = ["  完整赛制预测 (小组赛+淘汰赛, 模拟 %d 次)" % trials,
+                 "  %-8s %8s %8s %8s" % ("球队", "夺冠", "进决赛", "进四强"),
+                 "-" * 44]
+        for name, s in ranked:
+            lines.append("  %-8s %7.1f%% %7.1f%% %7.1f%%" % (
+                name, s["champion"] * 100, s["final"] * 100, s["semi"] * 100))
         self._set_text(self.txt_sim, "\n".join(lines))
 
     # -- 辅助 ------------------------------------------------------------

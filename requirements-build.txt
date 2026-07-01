@@ -1,0 +1,7 @@
+# 仅打包 exe 时需要的依赖 (运行程序本身不需要任何第三方库)
+#
+# 安装:  python -m pip install -r requirements-build.txt
+#
+# 兼容 Windows 7 时建议使用 Python 3.8.x, 并锁定 PyInstaller 4.x:
+#   新版 PyInstaller (5.x/6.x) 生成的 exe 可能无法在 Win7 上运行。
+pyinstaller==4.10

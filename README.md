@@ -35,8 +35,55 @@ python worldcup_predictor.py
 - 一键恢复默认评分
 
 ### 3. 赛事模拟
-对评分最高的 2ⁿ 支球队进行**单败淘汰赛**蒙特卡洛模拟，
-统计每支球队的**夺冠概率**（模拟次数可调）。
+两种赛制可选（模拟次数可调）：
+
+- **完整赛制（小组赛 + 淘汰赛）**：取评分最高的 32/16/8 支球队随机分组，
+  8 组单循环（3/1/0 计分，按积分→净胜球→进球排名），每组前 2 出线，
+  再按标准交叉赛制进入单败淘汰赛（平局点球决胜）。输出每队的
+  **夺冠 / 进决赛 / 进四强**概率。
+- **单败淘汰赛**：取评分最高的 2ⁿ 支球队直接进行单败淘汰，输出**夺冠概率**。
+
+## 用历史数据校准评分
+
+系统可以用**真实历史比分**反推、校准球队评分（Elo 算法）：
+
+- **图形界面**：在「球队评分」页点 **从历史数据校准**，选择比分 CSV 即可。
+- **命令行脚本**：
+  ```bash
+  python calibrate.py historical_matches.csv teams.json
+  ```
+  以现有评分为先验，逐场按「实际结果 vs 预期」的偏差更新评分，
+  进球差越大调整越大；校准结果写回 `teams.json`。
+
+CSV 格式（表头必须包含以下列，`weight` 可选，表示比赛权重）：
+
+```csv
+home,away,home_goals,away_goals,weight
+阿根廷,法国,3,3,1.5
+日本,德国,2,1,1.3
+```
+
+> ⚠️ 仓库自带的 `historical_matches.csv` 仅为**示例数据**，用于演示校准流程，
+> 并非权威赛果。请替换为你自己的真实比分以获得准确评分。
+
+## 打包成 exe（Windows 双击即用）
+
+打包后可以**不装 Python 直接双击运行**。在 **Windows** 机器上：
+
+```bat
+:: 双击 build_exe.bat, 或在命令行运行:
+build_exe.bat
+```
+
+生成的可执行文件位于 `dist\WorldCupPredictor.exe`。
+
+> ⚠️ **PyInstaller 不能跨平台**：要生成 Windows 的 exe，必须在 Windows 上打包
+> （在 Linux/Mac 上打包只能得到对应平台的可执行文件）。
+> 要兼容 **Windows 7**，请使用 **Python 3.8.x + PyInstaller 4.x**
+> （见 `requirements-build.txt`）；新版 PyInstaller 生成的 exe 可能无法在 Win7 上运行。
+
+相关文件：`build_exe.bat`（一键打包脚本）、`worldcup_predictor.spec`（打包配置）、
+`requirements-build.txt`（打包依赖）。
 
 ## 预测模型原理
 
@@ -58,6 +105,11 @@ python worldcup_predictor.py
 
 | 文件 | 说明 |
 |------|------|
-| `worldcup_predictor.py` | 主程序（图形界面 + 预测模型） |
-| `teams.json` | 球队评分存档（首次保存后生成） |
+| `worldcup_predictor.py` | 主程序（图形界面 + 预测模型 + 赛事模拟 + 校准引擎） |
+| `calibrate.py` | 命令行评分校准脚本 |
+| `historical_matches.csv` | 历史比分**示例**数据（请替换为真实数据） |
+| `build_exe.bat` | Windows 一键打包 exe 脚本 |
+| `worldcup_predictor.spec` | PyInstaller 打包配置 |
+| `requirements-build.txt` | 打包所需依赖（运行程序本身无需依赖） |
+| `teams.json` | 球队评分存档（保存/校准后生成） |
 | `README.md` | 本说明文档 |
