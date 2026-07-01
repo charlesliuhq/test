@@ -1,0 +1,50 @@
+name: Build Windows EXE
+
+# 在 GitHub 云端的 Windows 机器上把预测系统打包成 exe。
+# 触发方式:
+#   - 推送到 claude/** 分支时自动构建 (方便随时拿到最新 exe)
+#   - 在 Actions 页面手动点击 "Run workflow"
+#   - 推送 v* 标签时构建并发布到 Release
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "claude/**"
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # 打 tag 时创建 Release 需要
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 使用 Python 3.8 以兼容 Windows 7
+      - name: 安装 Python 3.8
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: 安装打包依赖
+        run: python -m pip install -r requirements-build.txt
+
+      - name: 打包 exe
+        run: python -m PyInstaller --clean --noconfirm worldcup_predictor.spec
+
+      - name: 上传构建产物 (exe)
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorldCupPredictor-exe
+          path: dist/WorldCupPredictor.exe
+          if-no-files-found: error
+
+      # 仅当推送 v* 标签时, 把 exe 发布到 GitHub Release
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/WorldCupPredictor.exe

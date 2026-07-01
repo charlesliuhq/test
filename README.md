@@ -85,6 +85,22 @@ build_exe.bat
 相关文件：`build_exe.bat`（一键打包脚本）、`worldcup_predictor.spec`（打包配置）、
 `requirements-build.txt`（打包依赖）。
 
+### 在 GitHub 上自动打包（推荐，无需本地 Windows）
+
+仓库内置了 GitHub Actions 工作流 `.github/workflows/build-exe.yml`，会在
+GitHub 云端的 Windows 机器上自动打包，你**不需要自己的 Windows 电脑**：
+
+- **自动构建**：每次推送到 `claude/**` 分支都会触发；也可在仓库
+  **Actions** 页面手动点击 *Run workflow*。
+- **下载 exe**：构建完成后进入对应的 workflow run 页面，在底部
+  **Artifacts** 区域下载 `WorldCupPredictor-exe`（解压即得 `.exe`）。
+- **发布 Release**：推送 `v1.0` 这类 `v*` 标签时，exe 会自动发布到
+  GitHub **Releases**，供任何人直接下载。
+
+  ```bash
+  git tag v1.0 && git push origin v1.0
+  ```
+
 ## 预测模型原理
 
 1. 每支球队有一个**实力评分**（数值越高越强）。
