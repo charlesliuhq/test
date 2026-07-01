@@ -30,6 +30,12 @@ try:
 except Exception:  # pragma: no cover - 无图形环境时降级为命令行
     HAS_TK = False
 
+try:
+    import livedata  # 实时赛事数据 (football-data.org)
+    HAS_LIVE = True
+except Exception:  # 缺少 livedata.py 时不影响其余功能
+    HAS_LIVE = False
+
 
 # ---------------------------------------------------------------------------
 # 数据: 默认球队评分 (数值越高实力越强, 参考 Elo/FIFA 排名, 可自行调整)
@@ -402,6 +408,11 @@ class PredictorApp(object):
         self._build_teams_tab()
         self._build_sim_tab()
 
+        if HAS_LIVE:
+            self.tab_live = ttk.Frame(notebook)
+            notebook.add(self.tab_live, text="实时赛程")
+            self._build_live_tab()
+
     # -- 单场预测 --------------------------------------------------------
     def _build_match_tab(self):
         frm = self.tab_match
@@ -656,6 +667,123 @@ class PredictorApp(object):
             lines.append("  %-8s %7.1f%% %7.1f%% %7.1f%%" % (
                 name, s["champion"] * 100, s["final"] * 100, s["semi"] * 100))
         self._set_text(self.txt_sim, "\n".join(lines))
+
+    # -- 实时赛程 --------------------------------------------------------
+    def _build_live_tab(self):
+        frm = self.tab_live
+        cfg = livedata.load_config()
+
+        row = ttk.Frame(frm)
+        row.pack(pady=8, fill="x", padx=10)
+        ttk.Label(row, text="API Token:").grid(row=0, column=0, padx=4)
+        self.ent_token = ttk.Entry(row, width=34, show="*")
+        self.ent_token.grid(row=0, column=1, padx=4)
+        self.ent_token.insert(0, str(cfg.get("football_data_token", "")))
+        ttk.Button(row, text="保存 Token", command=self.on_save_token).grid(
+            row=0, column=2, padx=4)
+        ttk.Label(row, text="(football-data.org 免费注册获取)").grid(
+            row=1, column=1, sticky="w", padx=4)
+
+        row2 = ttk.Frame(frm)
+        row2.pack(pady=4)
+        ttk.Label(row2, text="赛事代码:").grid(row=0, column=0, padx=4)
+        self.ent_comp = ttk.Entry(row2, width=8)
+        self.ent_comp.insert(0, livedata.DEFAULT_COMPETITION)  # WC = 世界杯
+        self.ent_comp.grid(row=0, column=1, padx=4)
+        ttk.Button(row2, text="获取赛程并预测",
+                   command=self.on_fetch_fixtures).grid(row=0, column=2, padx=6)
+        ttk.Button(row2, text="更新赛果并校准评分",
+                   command=self.on_update_results).grid(row=0, column=3, padx=6)
+
+        self.txt_live = tk.Text(frm, height=18, width=74, state="disabled")
+        self.txt_live.pack(padx=10, pady=8, fill="both", expand=True)
+        self._set_text(
+            self.txt_live,
+            "  使用说明:\n"
+            "  1. 填入 football-data.org 的免费 API Token 并保存\n"
+            "  2. 赛事代码默认 WC (2026 世界杯), 点『获取赛程并预测』\n"
+            "  3. 点『更新赛果并校准评分』可用已结束比赛自动校准球队评分\n"
+            "  (需要联网; 世界杯数据是否可用取决于你的 football-data 套餐)")
+
+    def on_save_token(self):
+        cfg = livedata.load_config()
+        cfg["football_data_token"] = self.ent_token.get().strip()
+        try:
+            livedata.save_config(cfg)
+            messagebox.showinfo("成功", "Token 已保存到 config.json")
+        except Exception as e:
+            messagebox.showerror("错误", str(e))
+
+    def _current_token(self):
+        return livedata.get_token(self.ent_token.get().strip())
+
+    def _fetch_split(self):
+        """拉取并拆分比赛, 返回 (upcoming, finished) 或抛出 LiveDataError。"""
+        token = self._current_token()
+        comp = self.ent_comp.get().strip() or livedata.DEFAULT_COMPETITION
+        matches = livedata.fetch_all_matches(token, comp)
+        return livedata.split_matches(matches)
+
+    def on_fetch_fixtures(self):
+        self._set_text(self.txt_live, "正在获取赛程, 请稍候...")
+        self.root.update_idletasks()
+        try:
+            upcoming, finished = self._fetch_split()
+        except livedata.LiveDataError as e:
+            self._set_text(self.txt_live, "获取失败:\n  %s" % e)
+            return
+        if not upcoming:
+            self._set_text(
+                self.txt_live,
+                "没有『即将进行』的比赛。\n"
+                "(已结束比赛 %d 场, 可点『更新赛果并校准评分』)" % len(finished))
+            return
+        lines = ["  即将进行的比赛预测 (共 %d 场)" % len(upcoming), "-" * 60]
+        for m in upcoming[:40]:
+            ra = livedata.rating_of(self.teams, m["home"])
+            rb = livedata.rating_of(self.teams, m["away"])
+            res = predict_match(ra, rb)
+            top = res["top_scores"][0]
+            lines.append("  %s  %s vs %s" % (m["date"], m["home"], m["away"]))
+            lines.append("      胜 %.0f%% / 平 %.0f%% / 负 %.0f%%   最可能 %d:%d" % (
+                res["win_a"] * 100, res["draw"] * 100, res["win_b"] * 100,
+                top[0], top[1]))
+        self._set_text(self.txt_live, "\n".join(lines))
+
+    def on_update_results(self):
+        self._set_text(self.txt_live, "正在获取赛果并校准, 请稍候...")
+        self.root.update_idletasks()
+        try:
+            upcoming, finished = self._fetch_split()
+        except livedata.LiveDataError as e:
+            self._set_text(self.txt_live, "获取失败:\n  %s" % e)
+            return
+        if not finished:
+            self._set_text(self.txt_live, "暂无已结束的比赛可用于校准。")
+            return
+        rows = livedata.results_to_calibration_rows(finished)
+        before = dict(self.teams)
+        self.teams = calibrate_ratings(self.teams, rows)
+        self._refresh_tree()
+        self._refresh_comboboxes()
+        movers = []
+        for name in self.teams:
+            old = before.get(name)
+            if old is not None:
+                movers.append((name, self.teams[name] - old))
+        movers.sort(key=lambda x: abs(x[1]), reverse=True)
+        lines = ["  已用 %d 场赛果校准评分。" % len(finished), "-" * 40,
+                 "  变化最大的球队:"]
+        for n, d in movers[:10]:
+            if abs(d) >= 0.5:
+                lines.append("     %s: %+.0f" % (n, d))
+        lines.append("")
+        lines.append("  最近赛果:")
+        for m in finished[-8:]:
+            lines.append("     %s  %s %d:%d %s" % (
+                m["date"], m["home"], m["home_goals"],
+                m["away_goals"], m["away"]))
+        self._set_text(self.txt_live, "\n".join(lines))
 
     # -- 辅助 ------------------------------------------------------------
     def _sorted_names(self):

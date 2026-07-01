@@ -17,7 +17,7 @@ a = Analysis(
     datas=[
         ('historical_matches.csv', '.'),
     ],
-    hiddenimports=[],
+    hiddenimports=['livedata'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
